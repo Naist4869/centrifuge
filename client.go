@@ -1,6 +1,7 @@
 package centrifuge
 
 import (
+	"A-type-bot/pkg/model"
 	"context"
 	"errors"
 	"fmt"
@@ -655,6 +656,7 @@ func (c *Client) updatePresence() {
 		c.mu.Unlock()
 		return
 	}
+
 	channels := make(map[string]ChannelContext, len(c.channels))
 	for channel, channelContext := range c.channels {
 		if !channelHasFlag(channelContext.flags, flagSubscribed) {
@@ -2013,6 +2015,7 @@ func (c *Client) handleHistory(req *protocol.HistoryRequest, cmd *protocol.Comma
 				c.logWriteInternalErrorFlush(commandHistory, cmd, err, "error getting history", started, rw)
 				return
 			}
+
 			pubs = result.Publications
 			offset = result.Offset
 			epoch = result.Epoch
@@ -2954,6 +2957,7 @@ func (c *Client) writePublicationUpdatePosition(ch string, pub *protocol.Publica
 		c.mu.Unlock()
 		return nil
 	}
+
 	if !channelHasFlag(channelContext.flags, flagPositioning) {
 		if hasFlag(c.transport.DisabledPushFlags(), PushFlagPublication) {
 			c.mu.Unlock()
@@ -2963,9 +2967,7 @@ func (c *Client) writePublicationUpdatePosition(ch string, pub *protocol.Publica
 		return c.transportEnqueue(data)
 	}
 	serverSide := channelHasFlag(channelContext.flags, flagServerSide)
-	currentPositionOffset := channelContext.streamPosition.Offset
-	nextExpectedOffset := currentPositionOffset + 1
-	pubOffset := pub.Offset
+
 	pubEpoch := sp.Epoch
 	if pubEpoch != channelContext.streamPosition.Epoch {
 		if c.node.logger.enabled(LogLevelDebug) {
@@ -2976,6 +2978,19 @@ func (c *Client) writePublicationUpdatePosition(ch string, pub *protocol.Publica
 		c.mu.Unlock()
 		return nil
 	}
+
+	if _, exist := pub.Tags[model.Revise]; exist {
+		if hasFlag(c.transport.DisabledPushFlags(), PushFlagPublication) {
+			c.mu.Unlock()
+			return nil
+		}
+		c.mu.Unlock()
+		return c.transportEnqueue(data)
+	}
+
+	pubOffset := pub.Offset
+	currentPositionOffset := channelContext.streamPosition.Offset
+	nextExpectedOffset := currentPositionOffset + 1
 	if pubOffset != nextExpectedOffset {
 		if c.node.logger.enabled(LogLevelDebug) {
 			c.node.logger.log(newLogEntry(LogLevelDebug, "client insufficient state", map[string]any{"channel": ch, "user": c.user, "client": c.uid, "offset": pubOffset, "expectedOffset": nextExpectedOffset}))

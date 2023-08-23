@@ -109,4 +109,9 @@ var (
 		Code:    112,
 		Message: "unrecoverable position",
 	}
+
+	ErrorHistoryLoseData = &Error{
+		Code:    113,
+		Message: "history lose data",
+	}
 )

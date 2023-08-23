@@ -1,6 +1,7 @@
 package centrifuge
 
 import (
+	"A-type-bot/pkg/model"
 	"bytes"
 	"context"
 	"errors"
@@ -65,21 +66,22 @@ type shardWrapper struct {
 // By default, Redis >= 5 required (due to the fact RedisBroker uses STREAM data structure
 // to keep publication history for a channel).
 type RedisBroker struct {
-	controlRound           uint64
-	node                   *Node
-	sharding               bool
-	config                 RedisBrokerConfig
-	shards                 []*shardWrapper
-	historyListScript      *rueidis.Lua
-	historyStreamScript    *rueidis.Lua
-	addHistoryListScript   *rueidis.Lua
-	addHistoryStreamScript *rueidis.Lua
-	shardChannel           string
-	messagePrefix          string
-	controlChannel         string
-	nodeChannel            string
-	closeOnce              sync.Once
-	closeCh                chan struct{}
+	controlRound                uint64
+	node                        *Node
+	sharding                    bool
+	config                      RedisBrokerConfig
+	shards                      []*shardWrapper
+	historyListScript           *rueidis.Lua
+	historyStreamScript         *rueidis.Lua
+	addHistoryListScript        *rueidis.Lua
+	addHistoryStreamScript      *rueidis.Lua
+	updateListMessageAndPublish *rueidis.Lua
+	shardChannel                string
+	messagePrefix               string
+	controlChannel              string
+	nodeChannel                 string
+	closeOnce                   sync.Once
+	closeCh                     chan struct{}
 }
 
 // RedisBrokerConfig is a config for Broker.
@@ -171,15 +173,16 @@ func NewRedisBroker(n *Node, config RedisBrokerConfig) (*RedisBroker, error) {
 	}
 
 	b := &RedisBroker{
-		node:                   n,
-		config:                 config,
-		shards:                 shardWrappers,
-		sharding:               len(config.Shards) > 1,
-		historyStreamScript:    rueidis.NewLuaScript(historyStreamSource),
-		historyListScript:      rueidis.NewLuaScript(historyListSource),
-		addHistoryStreamScript: rueidis.NewLuaScript(addHistoryStreamSource),
-		addHistoryListScript:   rueidis.NewLuaScript(addHistoryListSource),
-		closeCh:                make(chan struct{}),
+		node:                        n,
+		config:                      config,
+		shards:                      shardWrappers,
+		sharding:                    len(config.Shards) > 1,
+		historyStreamScript:         rueidis.NewLuaScript(historyStreamSource),
+		historyListScript:           rueidis.NewLuaScript(historyListSource),
+		addHistoryStreamScript:      rueidis.NewLuaScript(addHistoryStreamSource),
+		updateListMessageAndPublish: rueidis.NewLuaScript(updateListMessageAndPublish),
+		addHistoryListScript:        rueidis.NewLuaScript(addHistoryListSource),
+		closeCh:                     make(chan struct{}),
 	}
 	b.shardChannel = config.Prefix + redisPubSubShardChannelSuffix
 	b.messagePrefix = config.Prefix + redisClientChannelPrefix
@@ -239,7 +242,12 @@ if epoch == false or epoch == nil then
   epoch = ARGV[6]
   redis.call("hset", KEYS[2], "e", epoch)
 end
-local offset = redis.call("hincrby", KEYS[2], "s", 1)
+local offset
+if ARGV[8] ~= "" then
+  offset = tonumber(ARGV[8])
+else
+  offset = redis.call("hincrby", KEYS[2], "s", 1)
+end
 if ARGV[5] ~= '0' then
 	redis.call("expire", KEYS[2], ARGV[5])
 end
@@ -285,6 +293,40 @@ if ARGV[4] ~= '' then
 end
 return {offset, epoch}
 	`
+
+	/*
+	   -- KEYS[1] - history LIST key
+	   -- KEYS[2] - history meta HASH key
+	   -- ARGV[1] - offset of the list item to update
+	   -- ARGV[2] - new message payload
+	   -- ARGV[3] - channel to publish message to
+	   -- ARGV[4] - command to publish (publish or spublish)
+	*/
+	updateListMessageAndPublish = `
+local epoch
+if redis.call('exists', KEYS[2]) ~= 0 then
+  epoch = redis.call("hget", KEYS[2], "e")
+end
+if epoch ~= false and epoch ~= nil then
+	local listSize = redis.call('llen', KEYS[1])
+	for i = 0, listSize - 1, 1 do
+		local message = redis.call('lindex', KEYS[1], i)
+		local parts = {}
+		for part in string.gmatch(message, "[^:]+") do
+    		table.insert(parts, part)
+		end
+		local oldOffset = tonumber(parts[2])
+		if oldOffset == tonumber(ARGV[1]) then
+			local newPayload = "__" .. "p1:" .. oldOffset .. ":" .. epoch .. "__" .. ARGV[2]
+			redis.call('lset', KEYS[1], i, newPayload)
+			if ARGV[3] ~= '' then
+				redis.call(ARGV[4], ARGV[3], newPayload)
+			end
+		end
+	end
+end
+return epoch
+`
 
 	// Retrieve channel history information from LIST.
 	// KEYS[1] - history LIST key
@@ -777,7 +819,10 @@ func (b *RedisBroker) publish(s *shardWrapper, ch string, data []byte, opts Publ
 		size = opts.HistorySize
 		script = b.addHistoryStreamScript
 	}
-
+	var originalOffset string
+	if opts.Tags != nil {
+		originalOffset = opts.Tags[model.OriginalOffset]
+	}
 	replies, err := script.Exec(
 		context.Background(),
 		s.shard.client,
@@ -790,6 +835,7 @@ func (b *RedisBroker) publish(s *shardWrapper, ch string, data []byte, opts Publ
 			strconv.Itoa(historyMetaTTLSeconds),
 			strconv.FormatInt(time.Now().Unix(), 10),
 			publishCommand,
+			originalOffset,
 		},
 	).ToArray()
 	if err != nil {
@@ -807,6 +853,51 @@ func (b *RedisBroker) publish(s *shardWrapper, ch string, data []byte, opts Publ
 		return StreamPosition{}, errors.New("wrong Redis reply epoch")
 	}
 	return StreamPosition{Offset: uint64(offset), Epoch: epoch}, nil
+}
+
+func (b *RedisBroker) UpdateStreamMessage(ch string, offset uint64, data []byte, opts PublishOptions) (StreamPosition, error) {
+	return b.updateStreamMessage(b.getShard(ch), ch, offset, data, opts)
+}
+
+func (b *RedisBroker) updateStreamMessage(s *shardWrapper, ch string, offset uint64, data []byte, opts PublishOptions) (StreamPosition, error) {
+	protoPub := &protocol.Publication{
+		Data: data,
+		Info: infoToProto(opts.ClientInfo),
+		Tags: opts.Tags,
+	}
+
+	byteMessage, err := protoPub.MarshalVT()
+	if err != nil {
+		return StreamPosition{}, err
+	}
+
+	publishChannel := b.messageChannelID(s.shard, ch)
+	useShardedPublish := b.useShardedPubSub(s.shard)
+	var publishCommand = "publish"
+	if useShardedPublish {
+		publishCommand = "spublish"
+	}
+
+	historyMetaKey := b.historyMetaKey(s.shard, ch)
+	streamKey := b.historyListKey(s.shard, ch)
+	script := b.updateListMessageAndPublish
+
+	epoch, err := script.Exec(
+		context.Background(),
+		s.shard.client,
+		[]string{string(streamKey), string(historyMetaKey)},
+		[]string{
+			strconv.Itoa(int(offset)),
+			convert.BytesToString(byteMessage),
+			string(publishChannel),
+			publishCommand,
+		},
+	).ToString()
+
+	return StreamPosition{
+		Offset: offset,
+		Epoch:  epoch,
+	}, err
 }
 
 // PublishJoin - see Broker.PublishJoin.
