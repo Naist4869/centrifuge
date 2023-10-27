@@ -29,6 +29,11 @@ func WithTags(meta map[string]string) PublishOption {
 		opts.Tags = meta
 	}
 }
+func WithChannelName(ch string) PublishOption {
+	return func(opts *PublishOptions) {
+		opts.ChannelName = ch
+	}
+}
 
 // SubscribeOptions define per-subscription options.
 type SubscribeOptions struct {

@@ -112,7 +112,7 @@ func (s *WebsocketHandler) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		if query.Get("cf_ws_frame_ping_pong") == "true" {
 			// This is a way for tools like Postman, wscat and others to maintain
 			// active connection to the Centrifuge-based server without the need to
-			// respond to app-level pings. We rely on native websocket ping/pong
+			// respond to app-level pings. We rely on native websocket ping/pong.
 			// frames in this case.
 			useFramePingPong = true
 		}

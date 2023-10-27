@@ -163,12 +163,6 @@ func New(c Config) (*Node, error) {
 	}
 	n.emulationSurveyHandler = newEmulationSurveyHandler(n)
 
-	b, err := NewMemoryBroker(n, MemoryBrokerConfig{})
-	if err != nil {
-		return nil, err
-	}
-	n.SetBroker(b)
-
 	m, err := NewMemoryPresenceManager(n, MemoryPresenceManagerConfig{})
 	if err != nil {
 		return nil, err

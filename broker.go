@@ -103,6 +103,8 @@ type PublishOptions struct {
 	ClientInfo *ClientInfo
 	// Tags to set Publication.Tags.
 	Tags map[string]string
+
+	ChannelName string
 }
 
 // Broker is responsible for PUB/SUB mechanics.

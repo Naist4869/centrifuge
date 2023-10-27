@@ -35,8 +35,6 @@ type MemoryBroker struct {
 	closeCh   chan struct{}
 }
 
-var _ Broker = (*MemoryBroker)(nil)
-
 // MemoryBrokerConfig is a memory broker config.
 type MemoryBrokerConfig struct{}
 
